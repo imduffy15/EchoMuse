@@ -1,0 +1,179 @@
+# Echo Show 5 gen 1 ("checkers") port
+
+Support for the Amazon Echo Show 5 (2019) running LineageOS 18.1, alongside
+the original Echo Dot gen 2 ("biscuit").
+
+Everything below was measured on the hardware, not inferred from datasheets.
+
+## Why this device is close to biscuit
+
+The Echo Show 5 uses the same MT8163 SoC and, more usefully, the **same
+microphone driver**. `amzn-mt-spi-pcm` presents the mic array over SPI from an
+FPGA that converts I2S, and its channel count is a compile-time kernel option:
+
+```c
+#if defined CONFIG_SND_SOC_8_MICS
+#define SPI_N_CHANNELS   9      /* biscuit */
+#elif defined CONFIG_SND_SOC_4_MICS
+#define SPI_N_CHANNELS   6
+#else
+#define SPI_N_CHANNELS   4      /* checkers */
+#endif
+```
+
+checkers builds the `#else` branch — confirmed against the device's own
+`/proc/config.gz`, which has both `SND_SOC_8_MICS` and `SND_SOC_4_MICS` unset
+and ships `CONFIG_EXTRA_FIRMWARE="i2s_to_spi_4ch_v193.bin"`.
+
+So the capture path is not a rewrite. It is the same driver with different
+constants, which is what `internal/profile` now expresses.
+
+## Hardware map
+
+|                | biscuit (Dot 2)        | checkers (Show 5 gen 1)   |
+| -------------- | ---------------------- | ------------------------- |
+| SoC            | MT8163                 | MT8163                    |
+| Mic ADCs       | 4x TLV320ADC3101       | 1x TLV320AIC3101          |
+| Capture PCM    | card 0, device 24      | **card 0, device 22**     |
+| Capture format | 9ch S24_3LE @16k       | **4ch S24_3LE @16k**      |
+| Playback PCM   | card 0, device 23      | card 0, device 23         |
+| Output codec   | TLV320AIC32x4          | **RT5616** + amp on GPIO35 |
+| Output         | mono                   | mono                      |
+| LED ring       | 12x IS31FL3236A        | **none** (screen)         |
+| ABI            | armeabi-v7a            | armeabi-v7a               |
+
+Capture constraints, as reported by the driver's own `HW_REFINE` rather than
+assumed:
+
+```
+format      S24_3LE only
+channels    4 (channels_min == channels_max)
+rate        16000 .. 48000
+period      257 .. 2570 frames  (3084 .. 30840 bytes, 12 bytes/frame)
+periods     1 .. 10
+access      RW_INTERLEAVED only
+```
+
+Channel roles:
+
+```
+ch0, ch1    microphones      (0.92 inter-mic correlation)
+ch2, ch3    AEC reference    (see below)
+```
+
+## The hardware AEC reference
+
+ch2/ch3 carry a loopback of the playback signal, resampled 48k -> 16k by the
+FPGA and delivered **in the same stream as the mics**, so it is inherently
+sample-aligned. Measured:
+
+```
+correlation ch2 vs ch3   1.000000   (bit-identical; max |ch2-ch3| = 0)
+echo path delay          40 samples (2.50 ms)
+echo attenuation         -13.0 dB
+mic/reference correlation 0.83
+```
+
+This is materially better than biscuit, where aligning the reference needs a
+governor with drift telemetry. Here speex `mdf` can take ch2 directly.
+
+The reference is silent whenever nothing is playing, so an all-zero ch2/ch3 in
+a capture means "no playback", not "no loopback".
+
+## The one non-obvious setting
+
+```
+Ext_Speaker_Amp_Switch  must be "Off" for audio to reach the speaker
+```
+
+Its boot default is `On`, and `On` silences output completely. Nothing about
+the name suggests this. It was found by snapshotting the mixer at the instant
+Android's audio HAL opened the output PCM and diffing against a pristine
+post-boot baseline: that control and the expected DAPM unmute were the *only*
+two differences.
+
+`Profile.MixerInit` sets it; `Profile.AmpOff` puts it back to `On` on shutdown,
+which is the quiet state.
+
+Playback settings are copied from what the Amazon HAL negotiates:
+`S16_LE, 2ch, 48000 Hz, period 1536, 2 periods`.
+
+## What changed in the tree
+
+| Path | Purpose |
+| ---- | ------- |
+| `internal/alsa/` | Dependency-free ALSA PCM client (raw ioctls, no CGO, no tinyalsa). Needed because the mic PCM only accepts S24_3LE. |
+| `internal/profile/` | Per-device hardware description; replaces compile-time constants. Autodetects from `ro.product.device`. |
+| `internal/bindings/mic/profile_microphone.go` | Profile-driven capture with the same fan-out and capture-loss telemetry as the original. |
+| `internal/bindings/speaker/profile_speaker.go` | Profile-driven playback. |
+| `internal/bindings/led/null_controller.go` | LED backend for devices with no ring. |
+| `internal/beamformer/bypass.go` | Passthrough for devices without a steerable array, bit-identical to `extractChannel`. |
+| `tools/profile_smoke/` | On-device end-to-end validation. |
+| `controller/device_payloads/start_server_checkers.sh` | Launcher without the Fire OS assumptions. |
+
+Nothing existing was removed; the biscuit bindings are untouched and remain the
+default when the profile is unknown.
+
+## Why no beamformer
+
+Two microphones fed by one stereo ADC is not an array worth steering, and the
+0.92 inter-mic correlation confirms both channels see substantially the same
+field. `Bypass` extracts a single channel (or the mean of both) using
+byte-for-byte the same gain, clipping and telemetry path as
+`Beamformer.extractChannel`, verified by `TestBypassMatchesExtractChannel`.
+
+This removes ~500 lines of the hardest, most empirical work from the port
+rather than deferring it.
+
+## Building
+
+The bindings need no CGO:
+
+```sh
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build ./internal/... 
+```
+
+The full server still needs the Android NDK for the AEC and evdev; retarget
+`device/compiler/Dockerfile` from `API=22` to `API=30`. The `armv7a` triple is
+unchanged — checkers reports `ro.product.cpu.abi=armeabi-v7a` despite the
+64-bit A53.
+
+## Validating on hardware
+
+```sh
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o profile_smoke ./tools/profile_smoke/
+adb push profile_smoke /data/local/tmp/
+adb shell /data/local/tmp/profile_smoke
+```
+
+It verifies the profile against the driver, captures a baseline, plays a tone
+through the `Speaker` interface, and asserts that the microphones and the AEC
+reference both hear it. It restarts the Android audio services and resets the
+amp on exit, including on SIGINT, so a failed run does not leave the device
+silent.
+
+Expected output ends with:
+
+```
+PASS: microphones hear the speaker — playback and capture both work
+PASS: hardware AEC reference is live
+```
+
+## Device access notes
+
+- The LineageOS build is `userdebug` with `ro.debuggable=1`, so `adb root`
+  works; Magisk is not required for bring-up.
+- SELinux is already permissive, so no policy work is needed. biscuit needed
+  its boot image patched because Fire OS's LK bootloader hardcoded
+  `androidboot.selinux=enforce`.
+- **Persistence is still unsolved.** With no Magisk there is no `service.d` to
+  launch from. Either install Magisk, or remount `/system` and add an
+  `init.rc` service. This does not block anything above.
+
+## Warning
+
+Do not experiment with the RT5616 mixer controls casually. Setting
+`HP Playback Switch` on, or routing `LOUT MIX DAC L1/R1` alongside the already
+routed `OUTVOL L/R`, silences Android audio in a way the HAL does not restore —
+it only manages the controls it knows about. A reboot clears it, since mixer
+state is volatile. Snapshot `tinymix -D 0` before changing anything.
