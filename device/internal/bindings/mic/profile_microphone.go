@@ -231,19 +231,3 @@ func (m *ProfileMicrophone) Close() error {
 	}
 	return nil
 }
-
-// WakeAudio converts a raw period into the mono 16-bit feed the wake-word
-// path consumes, using the profile's configured wake channel.
-func (m *ProfileMicrophone) WakeAudio(period, out []byte) int {
-	return alsa.DownconvertS24_3LEToS16(period, m.prof.Mic.Channels, m.prof.Mic.WakeChannel, out)
-}
-
-// Reference extracts the hardware AEC reference from a raw period. It returns
-// 0 frames on devices that provide no loopback, letting the AEC fall back to
-// a software reference.
-func (m *ProfileMicrophone) Reference(period []byte, out []int32) int {
-	if !m.prof.HasAECReference() {
-		return 0
-	}
-	return alsa.ExtractS24_3LE(period, m.prof.Mic.Channels, m.prof.Mic.RefChannels[0], out)
-}

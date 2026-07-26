@@ -48,13 +48,3 @@ func Apply(card int, controls []Control) error {
 	}
 	return nil
 }
-
-// Get reads a single control back, for verification and for snapshotting state
-// before it is modified.
-func Get(card int, selector string) (string, error) {
-	out, err := exec.Command("tinymix", "-D", strconv.Itoa(card), selector).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("tinymix %s: %w (%s)", selector, err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out)), nil
-}

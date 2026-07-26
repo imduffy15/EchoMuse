@@ -98,8 +98,10 @@ const (
 
 // mask parameter indices
 const (
-	pAccess = 0
-	pFormat = 1
+	pAccess    = 0
+	pFormat    = 1
+	pSubformat = 2
+	nMasks     = 3
 )
 
 // interval parameter indices (absolute)
@@ -163,7 +165,7 @@ func (h *hwParams) any() {
 	for i := range h {
 		h[i] = 0
 	}
-	for p := 0; p < 3; p++ {
+	for p := 0; p < nMasks; p++ {
 		base := h.maskOff(p)
 		for i := 0; i < 8; i++ {
 			binary.LittleEndian.PutUint32(h[base+i*4:], 0xFFFFFFFF)
@@ -201,10 +203,8 @@ type Config struct {
 // PCM is an open ALSA stream.
 type PCM struct {
 	fd            int
-	cfg           Config
 	bytesPerFrame int
 	bufferFrames  uint32
-	started       bool
 }
 
 // Path is the character device backing this stream.
@@ -271,7 +271,7 @@ func Open(cfg Config) (*PCM, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", cfg.Path(), err)
 	}
-	p := &PCM{fd: fd, cfg: cfg, bytesPerFrame: cfg.Channels * cfg.Format.Bytes()}
+	p := &PCM{fd: fd, bytesPerFrame: cfg.Channels * cfg.Format.Bytes()}
 
 	var ver int32
 	_ = ioctl(fd, ioctlPVersion, unsafe.Pointer(&ver))
@@ -320,7 +320,6 @@ func Open(cfg Config) (*PCM, error) {
 			syscall.Close(fd)
 			return nil, fmt.Errorf("START: %w", err)
 		}
-		p.started = true
 	}
 	return p, nil
 }
@@ -332,9 +331,6 @@ func (p *PCM) Prepare() error {
 	}
 	return nil
 }
-
-// BytesPerFrame is channels x sample width.
-func (p *PCM) BytesPerFrame() int { return p.bytesPerFrame }
 
 // BufferFrames is the ring size the driver settled on.
 func (p *PCM) BufferFrames() int { return int(p.bufferFrames) }

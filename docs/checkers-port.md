@@ -74,8 +74,15 @@ echo attenuation         -13.0 dB
 mic/reference correlation 0.83
 ```
 
-This is materially better than biscuit, where aligning the reference needs a
-governor with drift telemetry. Here speex `mdf` can take ch2 directly.
+**This is characterised but not yet consumed.** The AEC currently takes its far
+end from the speaker's software echo tap, the same as biscuit, and that works —
+`aecEnabled: true` with `aecDelayMs: 0`. Feeding it ch2 instead is a follow-up:
+the hardware reference is aligned by construction, so it should remove the need
+for the drift governor biscuit uses, but that change belongs with a measurement
+of the improvement rather than bundled into the port.
+
+The channel roles are recorded in the profile (`Mic.RefChannels`) so the
+plumbing is ready.
 
 The reference is silent whenever nothing is playing, so an all-zero ch2/ch3 in
 a capture means "no playback", not "no loopback".

@@ -157,6 +157,28 @@ type Profile struct {
 	UseALSABackend bool
 }
 
+// Capabilities is what the device tells the controller it can do, so the
+// controller can skip work the hardware cannot use.
+//
+// "leds" stays on even without a ring: the device still consumes ring *state*
+// — the controller's explicit "this frame is the listening ring" hint is what
+// drives the chime and backlight cue — it just renders it differently. What it
+// cannot use is "led_anim", the local animation engine, which would otherwise
+// spin a ticker rendering frames for zero LEDs.
+//
+// "beamforming" lets the controller skip the per-turn beam_lock/beam_unlock
+// round trip on a device with no steerable array.
+func (p Profile) Capabilities() []string {
+	caps := []string{"mic", "speaker", "leds", "buttons"}
+	if p.HasLEDRing {
+		caps = append(caps, "led_anim")
+	}
+	if p.Beamforming {
+		caps = append(caps, "beamforming")
+	}
+	return caps
+}
+
 // HasAECReference reports whether the capture stream carries a hardware
 // loopback of the playback signal.
 func (p Profile) HasAECReference() bool { return len(p.Mic.RefChannels) > 0 }
@@ -369,8 +391,11 @@ func Detect() *Profile {
 	return detected
 }
 
-func detect() *Profile {
-	name := prop("ro.product.device")
+func detect() *Profile { return detectFor(prop("ro.product.device")) }
+
+// detectFor maps a ro.product.device value to a profile. Split out from detect
+// so the mapping is testable without a device.
+func detectFor(name string) *Profile {
 	if p, ok := profiles[name]; ok {
 		log.Printf("profile: detected %q", p.Name)
 		return p

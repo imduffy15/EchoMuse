@@ -49,9 +49,15 @@ type Cue struct {
 	turn uint64
 }
 
-// maxTurn bounds how long the screen may stay held bright without an
-// end-of-listening signal.
-const maxTurn = 60 * time.Second
+const (
+	// maxTurn bounds how long the screen may stay held bright without an
+	// end-of-listening signal.
+	maxTurn = 60 * time.Second
+
+	// flushGrace is how long the rising chime waits for the controller's
+	// barge-in speaker flush to land before queueing itself.
+	flushGrace = 150 * time.Millisecond
+)
 
 // New builds a Cue for the profile. Returns nil when the device has an LED
 // ring, since the ring already is the acknowledgement.
@@ -93,6 +99,14 @@ func (c *Cue) Start() {
 
 	go func() {
 		c.raiseBacklight()
+
+		// The controller flushes the speaker at wake detection so a reply in
+		// progress is cut for barge-in. That flush and this chime are queued
+		// at the same moment, and when the flush wins it discards the chime —
+		// which is exactly the intermittent "no rising tone" this had. Let the
+		// flush land first. The falling chime needs no such wait: nothing
+		// flushes at end of listening.
+		time.Sleep(flushGrace)
 		c.playTone(c.chimeUp)
 
 		// Safety net: if the falling edge never arrives — a controller that
