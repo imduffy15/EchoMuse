@@ -77,6 +77,26 @@ type Volume struct {
 	Max int
 }
 
+// WakeCue describes how the device acknowledges wake-word detection on
+// hardware with no LED ring to turn green.
+type WakeCue struct {
+	// Enabled turns the whole thing on. False where the ring already is the
+	// acknowledgement.
+	Enabled bool
+	// ChimeMs is the total length of the two-note tone; 0 disables the chime.
+	ChimeMs int
+	// ChimeHz is the first note; the second is a major third above it.
+	ChimeHz float64
+	// ChimeAmplitude is 0..1 of full scale.
+	ChimeAmplitude float64
+	// BacklightPath is the sysfs brightness file to blip; "" disables it.
+	BacklightPath string
+	// BacklightMax is the value written while listening. The screen is held
+	// at this level for the whole turn and restored afterwards, rather than
+	// blipped — a flash says "heard you" but not "still listening".
+	BacklightMax int
+}
+
 // Profile is the full hardware description for one device.
 type Profile struct {
 	// Name matches ro.product.device.
@@ -93,6 +113,8 @@ type Profile struct {
 
 	// Buttons maps the physical controls to evdev nodes.
 	Buttons Buttons
+	// WakeCue is the acknowledgement shown when a voice turn starts.
+	WakeCue WakeCue
 	// Volume is the playback volume control.
 	Volume Volume
 	// HasMuteButtonLED is true where a discrete LED sits under the mic-off
@@ -187,6 +209,8 @@ var biscuit = Profile{
 		DotDevice:    "/dev/input/event1",
 		VolumeDevice: "/dev/input/event2",
 	},
+	// The 12-LED ring turning green is already the acknowledgement.
+	WakeCue: WakeCue{Enabled: false},
 	Volume: Volume{
 		Selector:    "61",
 		DisplayName: "PCM Playback Volume",
@@ -262,6 +286,17 @@ var checkers = Profile{
 		// 393/394 (see checkers.dtsi); event2 is the touchscreen.
 		DotDevice:    "",
 		VolumeDevice: "/dev/input/event6",
+	},
+	// No ring on a Show 5, so acknowledge with a chime and a blip of the
+	// screen backlight. Without either, you cannot tell the device heard the
+	// wake word until it answers, and you end up talking over it.
+	WakeCue: WakeCue{
+		Enabled:        true,
+		ChimeMs:        120,
+		ChimeHz:        880,
+		ChimeAmplitude: 0.18,
+		BacklightPath:  "/sys/class/leds/lcd-backlight/brightness",
+		BacklightMax:   255,
 	},
 	Volume: Volume{
 		// The RT5616 DAC1 digital volume, 0..175 like biscuit's control.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/internal/cue"
 	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
@@ -49,6 +50,10 @@ type Server struct {
 	// anim owns the device-rendered ring animation (led_anim messages).
 	anim animator
 
+	// wakeCue acknowledges the start of a voice turn on devices with no LED
+	// ring. nil where the ring already does that job.
+	wakeCue *cue.Cue
+
 	// audioLevel holds the live speaker RMS as float64 bits — written by
 	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
 	audioLevel atomic.Uint64
@@ -68,6 +73,9 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		mic:              microphone,
 		speaker:          speaker,
 	}
+
+	// Wake acknowledgement — nil on devices whose LED ring already signals it.
+	server.wakeCue = cue.New(profile.Detect(), speaker)
 
 	// Volume controller uses a getter so it handles the nil-during-boot window safely
 	server.volume = newVolumeController(func() led.Controller {
@@ -386,8 +394,20 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 			s.baseLEDs[l.ID] = l
 		}
 	}
+	// Edges only: the controller repaints the listening frame throughout a
+	// turn, and every repaint would otherwise re-acknowledge.
+	startedListening := listeningRing && !s.listeningLEDs
+	stoppedListening := !listeningRing && s.listeningLEDs
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
+
+	// Both are no-ops when the device has an LED ring, and both return
+	// immediately.
+	if startedListening {
+		s.wakeCue.Start()
+	} else if stoppedListening {
+		s.wakeCue.Stop()
+	}
 	if s.volume.DisplayActive() || s.mute.IsMuted() {
 		return
 	}

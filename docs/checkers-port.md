@@ -170,6 +170,52 @@ PASS: hardware AEC reference is live
   launch from. Either install Magisk, or remount `/system` and add an
   `init.rc` service. This does not block anything above.
 
+## Wake acknowledgement without an LED ring
+
+biscuit's 12-LED ring turning green is what tells you the device heard the wake
+word. A device with a screen and no ring has nothing, and without feedback you
+talk over a device that is not listening.
+
+`internal/cue` renders that feedback from hardware the Show 5 does have. It
+hangs off the signal the device already receives — the controller's explicit
+"this frame is the listening ring" hint — so no new control message was needed:
+
+| Event | Cue |
+| ----- | --- |
+| Listening starts | rising two-note chime, screen backlight to full |
+| Listening continues | screen **held** bright |
+| Listening ends | falling two-note chime, backlight restored |
+
+The screen is held rather than blipped deliberately. A flash answers "did it
+hear me" but not "is it still listening", and the second question is the one
+you need answered while deciding whether to keep talking.
+
+Implementation notes worth keeping:
+
+- Fires on **edges only**. The controller repaints the listening frame
+  throughout a turn; without edge detection every repaint re-chimes.
+- Each note gets a **raised-cosine envelope**. A bare sine switched on and off
+  clicks, and on this speaker the click is louder than the tone.
+- The chime goes through `PumpPeriod`, the same path as TTS, so it also lands
+  in the AEC reference rather than being a signal the canceller never saw.
+- A 60s safety net restores the backlight if the falling edge never arrives
+  (controller drops, turn times out), so the screen cannot stay stuck bright.
+- Disabled for biscuit, whose ring already does the job.
+
+## Tuning found on hardware
+
+- **Mic gain 12 dB, not the 24 dB default.** At 24 dB the capture clipped hard
+  (`clipped=1555`, rms 0.43) and Whisper hallucinated text out of the clipped
+  noise — transcripts came back as `' Rules of woodworking and metal- What time
+  is it?'`. Turns also hit the 50s timeout because the noise floor held the VAD
+  gate open. At 12 dB clipping stops and rms sits around 0.02.
+- **AEC on, `aecDelayMs: 0`.** The hardware reference is already sample-aligned
+  (2.5 ms), so there is no bulk latency to compensate for; the 300 ms tail
+  covers room reverb.
+
+Both are controller-side config (`system_config` → `global_device_config`),
+not device constants.
+
 ## Never stop audioserver on LineageOS
 
 This is the one change that looks obviously right and bootloops the device.
