@@ -284,10 +284,33 @@ var checkers = Profile{
 	},
 	// Two mics is not an array worth steering.
 	Beamforming: false,
-	// LineageOS rather than Fire OS: there is no "mixer" or "ledcontroller".
-	// Stopping these keeps the Android HAL off the PCMs, which also keeps the
-	// AEC reference valid by ensuring nothing else drives the DAC.
-	StopServices:   []string{"audioserver", "vendor.audio-hal"},
+	// Nothing. This list must stay empty on LineageOS, and the reason is
+	// worth spelling out because the obvious change is catastrophic.
+	//
+	// Stopping audioserver looks right — it keeps the Android HAL off the
+	// PCMs — and it is what the Fire OS profile does with its own services.
+	// On LineageOS it bootloops the device. system_server's AudioService
+	// makes synchronous binder calls to media.audio_policy, which audioserver
+	// provides; with audioserver stopped those calls block forever, Android's
+	// Watchdog kills system_server after 60s, and killing system_server
+	// reboots the device. The daemon then starts again at boot and repeats,
+	// roughly every 75 seconds:
+	//
+	//   ServiceManager: Waiting for service 'media.audio_policy' on '/dev/binder'
+	//   Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on main thread
+	//       at android.media.AudioSystem.setA11yServicesUids(Native Method)
+	//       at com.android.server.audio.AudioService...
+	//
+	// Not stopping it is safe: the HAL only opens a PCM when something plays,
+	// both PCMs report subdevices_avail: 1 at idle, and this daemon opens them
+	// exclusively. If Android does try to play afterwards it simply fails to
+	// open the device, which is the intended outcome anyway.
+	//
+	// If HAL contention ever does become a problem, the fix is to neuter the
+	// HAL rather than the service: replace /vendor/etc/audio_policy_configuration.xml
+	// with one declaring no primary module, so audioserver stays alive and
+	// answers binder calls but never opens a PCM.
+	StopServices:   nil,
 	UseALSABackend: true,
 }
 

@@ -170,6 +170,39 @@ PASS: hardware AEC reference is live
   launch from. Either install Magisk, or remount `/system` and add an
   `init.rc` service. This does not block anything above.
 
+## Never stop audioserver on LineageOS
+
+This is the one change that looks obviously right and bootloops the device.
+
+The daemon wants Android's audio HAL away from the PCMs, and the biscuit
+profile achieves that by stopping Fire OS services. Doing the equivalent here —
+`stop audioserver` — is fatal. `system_server` makes synchronous binder calls
+into `media.audio_policy`, which audioserver provides. With it stopped those
+calls block forever:
+
+```
+ServiceManager: Waiting for service 'media.audio_policy' on '/dev/binder'
+Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on main thread
+    at android.media.AudioSystem.setA11yServicesUids(Native Method)
+    at com.android.server.audio.AudioService...
+```
+
+Android's Watchdog kills `system_server` after 60s, and killing `system_server`
+reboots the device. With the daemon started from init, it comes back and does it
+again — a bootloop on a roughly 75-second cycle. `console-ramoops` shows a clean
+`reboot: Restarting system with command ''`, not a panic, which makes it easy to
+misread as an ordinary reboot.
+
+Leaving audioserver alone is safe. The HAL only opens a PCM when something
+plays, both PCMs report `subdevices_avail: 1` at idle, and the daemon opens
+them exclusively. If Android tries to play afterwards it just fails to open the
+device, which is the intended outcome.
+
+If HAL contention ever does become a real problem, neuter the HAL rather than
+the service: replace `/vendor/etc/audio_policy_configuration.xml` with one
+declaring no primary module. audioserver stays alive and answers binder calls
+but never opens a PCM.
+
 ## Warning
 
 Do not experiment with the RT5616 mixer controls casually. Setting

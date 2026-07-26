@@ -3,8 +3,9 @@
 #
 # Differences from the biscuit script:
 #   - No Fire OS services to wait on or kill. There is no echoaudioservice,
-#     no ledcontroller and no "mixer"; the daemon stops LineageOS's
-#     audioserver/vendor.audio-hal itself via the device profile.
+#     no ledcontroller and no "mixer". Critically, LineageOS's audioserver is
+#     left RUNNING: system_server blocks forever on media.audio_policy without
+#     it and Watchdog then reboots the device. See internal/profile.
 #   - No tinymix block. Mixer init lives in internal/profile so it stays in
 #     step with the card/device constants instead of drifting in a shell script.
 #   - No LED handling: this device has a screen, not a ring.
@@ -51,11 +52,18 @@ amp_off() {
     tinymix -D 0 Ext_Speaker_Amp_Switch On 2>/dev/null
 }
 
-# Hand the audio hardware back to Android if we are not going to use it.
-release_android_audio() {
+# Belt and braces: make sure Android's audio services are running.
+#
+# The daemon must never leave audioserver stopped on LineageOS. system_server
+# blocks forever on media.audio_policy without it, Watchdog kills system_server
+# after 60s, and that reboots the device — a ~75s bootloop. The profile no
+# longer stops them, but an older binary in the inactive A/B slot might, so
+# assert it here on every start too.
+ensure_android_audio() {
     start vendor.audio-hal 2>/dev/null
     start audioserver 2>/dev/null
 }
+ensure_android_audio
 
 # ── Signal handling ───────────────────────────────────────────────────────────
 SERVER_PID=0
@@ -99,14 +107,14 @@ while true; do
         server_b) FALLBACK=server_a ;;
         *)
             echo "[start_server] Unknown slot '$CURRENT' — cannot auto-rollback, giving up" >> "$LOG"
-            release_android_audio
+            ensure_android_audio
             exit 1
             ;;
     esac
 
     if [ ! -x "/data/local/bin/$FALLBACK" ]; then
         echo "[start_server] Fallback slot $FALLBACK missing — cannot auto-rollback" >> "$LOG"
-        release_android_audio
+        ensure_android_audio
         exit 1
     fi
 
