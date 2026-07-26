@@ -11,6 +11,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/wilbowes/EchoMuse/internal/alsa"
 )
@@ -67,6 +68,15 @@ type Profile struct {
 	// HasLEDRing is false on devices with a screen and no LED ring; the null
 	// LED controller is used instead.
 	HasLEDRing bool
+	// LEDCount is the size of the ring, 0 where there is none. Callers that
+	// paint a whole-ring colour use this rather than assuming 12.
+	LEDCount int
+
+	// AdcDigitalGainCtls and AdcMicpgaCtls are the mixer controls a config
+	// push retunes when it carries adc_digital_gain / adc_micpga. biscuit has
+	// four ADCs to keep in step; checkers has one.
+	AdcDigitalGainCtls []alsa.Control
+	AdcMicpgaCtls      []alsa.Control
 	// Beamforming is only meaningful with enough mics to steer. With two mics
 	// there is no array to speak of and the beamformer is bypassed.
 	Beamforming bool
@@ -74,6 +84,13 @@ type Profile struct {
 	// StopServices are init services stopped at startup so the daemon owns the
 	// audio hardware outright.
 	StopServices []string
+
+	// UseALSABackend selects the dependency-free ALSA bindings over the
+	// original tinyalsa ones. biscuit deliberately stays on tinyalsa: it is
+	// the configuration those deployments have been running, and there is no
+	// reason to move a working fleet onto a newer code path as a side effect
+	// of adding a second device.
+	UseALSABackend bool
 }
 
 // HasAECReference reports whether the capture stream carries a hardware
@@ -124,9 +141,17 @@ var biscuit = Profile{
 		{Index: 61, Values: []string{"0", "0"}, Optional: true},
 		{Index: 5, Values: []string{"Off"}, Optional: true},
 	},
-	HasLEDRing:   true,
-	Beamforming:  true,
-	StopServices: []string{"mixer", "ledcontroller"},
+	HasLEDRing: true,
+	LEDCount:   12,
+	AdcDigitalGainCtls: []alsa.Control{
+		{Index: 89}, {Index: 107}, {Index: 125}, {Index: 143},
+	},
+	AdcMicpgaCtls: []alsa.Control{
+		{Index: 92}, {Index: 110}, {Index: 128}, {Index: 146},
+	},
+	Beamforming:    true,
+	StopServices:   []string{"mixer", "ledcontroller"},
+	UseALSABackend: false,
 }
 
 // checkers is the Echo Show 5 gen 1: a single TLV320AIC3101 feeding the same
@@ -140,11 +165,16 @@ var checkers = Profile{
 	Name: "checkers",
 	Mic: Mic{
 		Card: 0, Device: 22,
-		Channels:    4, // channels_min == channels_max, fixed by the driver
-		Format:      alsa.FormatS24_3LE,
-		SampleRate:  16000,
-		PeriodSize:  257, // driver minimum: 3084 bytes / 12 bytes per frame
-		Periods:     4,
+		Channels:   4, // channels_min == channels_max, fixed by the driver
+		Format:     alsa.FormatS24_3LE,
+		SampleRate: 16000,
+		PeriodSize: 257, // driver minimum: 3084 bytes / 12 bytes per frame
+		// 8 periods = 2056 frames = ~128ms of ring. At 4 periods (~64ms) the
+		// capture telemetry logged arrival gaps of 33-51ms during playback —
+		// close enough to the ring depth that a scheduling hiccup would drop
+		// whole periods at the hardware with no error surfaced. The driver
+		// allows up to 10.
+		Periods:     8,
 		MicChannels: []int{0, 1},
 		// ch2/ch3 carry a bit-identical loopback of the playback signal,
 		// resampled to 16 kHz by the FPGA and sample-aligned with the mics.
@@ -174,12 +204,20 @@ var checkers = Profile{
 		{Name: "Ext_Speaker_Amp_Switch", Values: []string{"On"}, Optional: true},
 	},
 	HasLEDRing: false,
+	LEDCount:   0,
+	AdcDigitalGainCtls: []alsa.Control{
+		{Name: "ADC_A Digital Volume Control"},
+	},
+	AdcMicpgaCtls: []alsa.Control{
+		{Name: "ADC_A MICPGA Volume Ctrl"},
+	},
 	// Two mics is not an array worth steering.
 	Beamforming: false,
 	// LineageOS rather than Fire OS: there is no "mixer" or "ledcontroller".
 	// Stopping these keeps the Android HAL off the PCMs, which also keeps the
 	// AEC reference valid by ensuring nothing else drives the DAC.
-	StopServices: []string{"audioserver", "vendor.audio-hal"},
+	StopServices:   []string{"audioserver", "vendor.audio-hal"},
+	UseALSABackend: true,
 }
 
 var profiles = map[string]*Profile{
@@ -187,9 +225,22 @@ var profiles = map[string]*Profile{
 	checkers.Name: &checkers,
 }
 
+var (
+	detectOnce sync.Once
+	detected   *Profile
+)
+
 // Detect selects a profile from ro.product.device, falling back to biscuit so
 // existing deployments behave exactly as before.
+//
+// Memoised: it shells out to getprop, and several packages ask for the active
+// profile independently.
 func Detect() *Profile {
+	detectOnce.Do(func() { detected = detect() })
+	return detected
+}
+
+func detect() *Profile {
 	name := prop("ro.product.device")
 	if p, ok := profiles[name]; ok {
 		log.Printf("profile: detected %q", p.Name)

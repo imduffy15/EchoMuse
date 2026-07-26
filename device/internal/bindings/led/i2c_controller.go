@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"sync"
 
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"os"
 	"os/exec"
@@ -40,8 +41,8 @@ func (i *I2CController) Init() error {
 		return err
 	}
 
-        // privacy_brightness may not exist on all devices — ignore error
-        _ = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm)
+	// privacy_brightness may not exist on all devices — ignore error
+	_ = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm)
 
 	//if err = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm); err != nil {
 	//	return err
@@ -80,21 +81,33 @@ func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	var targetColor bytes.Buffer
-    for _, curLed := range LEDs {
-        for j, storedLed := range led.Leds {
-            if curLed.ID == storedLed.ID {
-                led.Leds[j] = curLed  // update stored with incoming
-                break
-            }
-        }
-    }
-    for _, l := range led.Leds {
-        targetColor.Write(l.BuildArgument())
-    }
-    return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
+	for _, curLed := range LEDs {
+		for j, storedLed := range led.Leds {
+			if curLed.ID == storedLed.ID {
+				led.Leds[j] = curLed // update stored with incoming
+				break
+			}
+		}
+	}
+	for _, l := range led.Leds {
+		targetColor.Write(l.BuildArgument())
+	}
+	return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
 }
 
+// NewDefaultController returns the LED backend this device actually has: the
+// I2C ring controller where there is a ring, and a null controller on devices
+// with a screen instead (Echo Show 5), whose IS31FL3236A sysfs paths do not
+// exist.
 func NewDefaultController() (led.Controller, error) {
+	if !profile.Detect().HasLEDRing {
+		controller := NewNullController()
+		if err := controller.Init(); err != nil {
+			return nil, err
+		}
+		return controller, nil
+	}
+
 	controller := &I2CController{}
 
 	if err := controller.Init(); err != nil {

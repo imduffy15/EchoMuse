@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strconv"
 
 	"github.com/wilbowes/EchoMuse/internal/alsa"
 )
@@ -50,6 +51,32 @@ func (p *Profile) SilenceAmp() {
 	if err := alsa.Apply(p.Mic.Card, p.AmpOff); err != nil {
 		log.Printf("profile: amp off: %v", err)
 	}
+}
+
+// SetMicGain retunes the capture gain from a config push. Values of 0 leave
+// that control alone, matching the previous "only apply what was sent"
+// behaviour. Both controls are stereo, so each value is written twice.
+//
+// Which controls these are is per-device: biscuit has four ADCs that must move
+// together, checkers has one.
+func (p *Profile) SetMicGain(digital, micpga int) {
+	apply := func(ctls []alsa.Control, v int) {
+		if v <= 0 || len(ctls) == 0 {
+			return
+		}
+		val := strconv.Itoa(v)
+		out := make([]alsa.Control, 0, len(ctls))
+		for _, c := range ctls {
+			c.Values = []string{val, val}
+			c.Optional = true // a missing control must not kill a config push
+			out = append(out, c)
+		}
+		if err := alsa.Apply(p.Mic.Card, out); err != nil {
+			log.Printf("profile: mic gain: %v", err)
+		}
+	}
+	apply(p.AdcDigitalGainCtls, digital)
+	apply(p.AdcMicpgaCtls, micpga)
 }
 
 // Verify checks the profile against what the driver actually reports, so a

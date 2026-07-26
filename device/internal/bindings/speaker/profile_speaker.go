@@ -41,24 +41,55 @@ type ProfileSpeaker struct {
 	monoPeriodBytes int
 	silence         []byte
 
+	// echoTap receives every period pumped to ALSA, silence included, so the
+	// AEC far end stays aligned with real playback time rather than only with
+	// the periods that carried audio. Set once before Init.
+	echoTap func([]byte)
+	// levelTap receives the RMS of each pumped period (0..1) and drives the
+	// energy-reactive LED pattern. Must be fast; it runs on the pump loop.
+	levelTap func(rms float64)
+
+	statsMu sync.Mutex
+	statsCb func(StreamStats)
+	stats   StreamStats
+	// primeWaitStart marks when the current stream began waiting to prime, so
+	// PrimeWaitMs measures the real added start latency.
+	primeWaitStart time.Time
+	streamActive   bool
+	// firstRecv/lastRecv bound the arrival span of the current stream, which
+	// is what distinguishes "the wire could not keep up" from "playback
+	// stuttered locally".
+	firstRecv, lastRecv time.Time
+
 	closeOnce sync.Once
 	deadOnce  sync.Once
 }
 
+// OnStreamStats registers a per-stream stats callback, reported once when a
+// stream reaches EOS. Invoked on its own goroutine so a slow consumer (the
+// network send) can never stall the ALSA pump.
+func (s *ProfileSpeaker) OnStreamStats(cb func(StreamStats)) {
+	s.statsMu.Lock()
+	s.statsCb = cb
+	s.statsMu.Unlock()
+}
+
 var _ pkgspeaker.Speaker = (*ProfileSpeaker)(nil)
 
-// audioChanDepth — the WS sender delivers well above realtime, so its lead
-// over playback grows until it hits this cap. Deep enough that a WiFi stall
-// shorter than the accumulated lead cannot drain the channel mid-stream.
-const audioChanDepth = 128
-
-// primePeriods — playback holds on silence until this many periods are queued
-// (or EOS arrives, for clips shorter than the prime). Protects the opening of
-// playback, when the sender's lead is still near zero.
-const primePeriods = 24
+// audioChanDepth, primePeriods, StreamStats and periodRMS are shared with the
+// tinyalsa backend and live in common.go.
 
 // NewProfileSpeaker constructs a playback backend for the given profile.
-func NewProfileSpeaker(p *profile.Profile) *ProfileSpeaker {
+//
+// echoTap and levelTap have the same contract as NewPcmSpeaker's: the former
+// feeds the AEC far end, the latter drives the LED level meter. Either may be
+// nil.
+//
+// On a device with a hardware AEC reference (Profile.HasAECReference) the
+// canceller can instead take the loopback channels straight off the capture
+// stream, which is sample-aligned by construction. echoTap remains available
+// so the software path still works and the two can be compared.
+func NewProfileSpeaker(p *profile.Profile, echoTap func([]byte), levelTap func(rms float64)) *ProfileSpeaker {
 	periodBytes := p.Speaker.PeriodSize * p.Speaker.FrameBytes()
 	return &ProfileSpeaker{
 		prof:            p,
@@ -68,6 +99,8 @@ func NewProfileSpeaker(p *profile.Profile) *ProfileSpeaker {
 		periodBytes:     periodBytes,
 		monoPeriodBytes: periodBytes / p.Speaker.Channels,
 		silence:         make([]byte, periodBytes),
+		echoTap:         echoTap,
+		levelTap:        levelTap,
 	}
 }
 
@@ -109,24 +142,44 @@ func (s *ProfileSpeaker) writeLoop() {
 		}
 
 		var period []byte
+		endOfStream := false
+
 		if !primed && len(s.audioCh) < primePeriods && !s.eosPending.Load() {
 			period = s.silence
 		} else {
-			primed = true
+			if !primed {
+				primed = true
+				s.statsMu.Lock()
+				if !s.primeWaitStart.IsZero() {
+					s.stats.PrimeWaitMs = time.Since(s.primeWaitStart).Milliseconds()
+				}
+				s.statsMu.Unlock()
+			}
 			select {
 			case p, ok := <-s.audioCh:
 				if !ok {
 					return
 				}
 				period = p
+				s.statsMu.Lock()
+				s.stats.Periods++
+				if d := len(s.audioCh); !s.streamActive || d < s.stats.MinDepth {
+					s.stats.MinDepth = d
+				}
+				s.streamActive = true
+				s.statsMu.Unlock()
 			default:
 				// Nothing queued: either a clean end of stream or an underrun.
 				if s.eosPending.Swap(false) {
-					primed = false
+					endOfStream = true
 				} else {
 					log.Printf("speaker: underrun — no audio queued")
-					primed = false
+					s.statsMu.Lock()
+					s.stats.Underruns++
+					s.stats.MinDepth = 0
+					s.statsMu.Unlock()
 				}
+				primed = false
 				period = s.silence
 			}
 		}
@@ -135,6 +188,44 @@ func (s *ProfileSpeaker) writeLoop() {
 			log.Printf("speaker: write error: %v", err)
 			return
 		}
+
+		// Taps run for silence too, so the AEC far end stays aligned with real
+		// playback time rather than only with the periods that carried audio.
+		if s.echoTap != nil {
+			s.echoTap(period)
+		}
+		if s.levelTap != nil {
+			if endOfStream || &period[0] == &s.silence[0] {
+				s.levelTap(0)
+			} else {
+				s.levelTap(periodRMS(period))
+			}
+		}
+
+		if endOfStream {
+			s.emitStreamStats()
+		}
+	}
+}
+
+// emitStreamStats reports and resets the current stream's counters. The
+// callback runs on its own goroutine so a slow consumer (a network send)
+// cannot stall the ALSA pump.
+func (s *ProfileSpeaker) emitStreamStats() {
+	s.statsMu.Lock()
+	st := s.stats
+	cb := s.statsCb
+	if !s.firstRecv.IsZero() {
+		st.RecvSpanMs = s.lastRecv.Sub(s.firstRecv).Milliseconds()
+	}
+	s.stats = StreamStats{}
+	s.streamActive = false
+	s.primeWaitStart = time.Time{}
+	s.firstRecv, s.lastRecv = time.Time{}, time.Time{}
+	s.statsMu.Unlock()
+
+	if cb != nil {
+		go cb(st)
 	}
 }
 
@@ -145,6 +236,21 @@ func (s *ProfileSpeaker) PumpPeriod(data []byte) error {
 		return errDead
 	default:
 	}
+
+	// Arrival telemetry: the gap between periods is the receive-side half of
+	// the delivery picture, and MaxGapMs distinguishes a uniformly slow link
+	// from one that stalled briefly.
+	now := time.Now()
+	s.statsMu.Lock()
+	if s.firstRecv.IsZero() {
+		s.firstRecv = now
+		s.primeWaitStart = now
+	} else if gap := now.Sub(s.lastRecv).Milliseconds(); gap > s.stats.MaxGapMs {
+		s.stats.MaxGapMs = gap
+	}
+	s.lastRecv = now
+	s.stats.BytesRecv += uint64(len(data))
+	s.statsMu.Unlock()
 
 	stereo := make([]byte, 0, len(data)*s.prof.Speaker.Channels)
 	sampleBytes := s.prof.Speaker.Format.Bytes()

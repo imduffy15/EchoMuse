@@ -33,6 +33,9 @@ func main() {
 	tone := flag.Float64("tone", 1000, "test tone frequency in Hz")
 	amp := flag.Float64("amp", 0.2, "test tone amplitude, 0..1")
 	secs := flag.Float64("seconds", 3, "capture duration")
+	captureOnly := flag.Bool("capture-only", false,
+		"microphones only — makes no sound. Use for long soak runs where the "+
+			"audio-vs-wall-clock ledger is the thing being measured.")
 	flag.Parse()
 
 	log.SetFlags(0)
@@ -98,9 +101,16 @@ func main() {
 	base := measure(mic, prof, *secs)
 	report(prof, base)
 
+	if *captureOnly {
+		fmt.Println("\ncapture-only: skipping the speaker test (no sound emitted)")
+		return
+	}
+
 	// --- speaker ---
 	fmt.Println("\n== speaker ==")
-	spk := bspk.NewProfileSpeaker(prof)
+	// nil taps: this tool measures acoustically via the mics, so it needs
+	// neither the AEC far-end feed nor the LED level meter.
+	spk := bspk.NewProfileSpeaker(prof, nil, nil)
 	if err := spk.Init(); err != nil {
 		log.Fatalf("speaker init: %v", err)
 	}

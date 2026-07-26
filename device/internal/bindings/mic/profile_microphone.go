@@ -88,10 +88,18 @@ func (m *ProfileMicrophone) readLoop() {
 	periodDur := time.Duration(m.prof.Mic.PeriodSize) * time.Second /
 		time.Duration(m.prof.Mic.SampleRate)
 
+	// The FPGA batches periods, so treat only gaps beyond half the ring depth
+	// as suspect: past that, one more stall really does lose data.
+	stallThreshold := periodDur * time.Duration(m.prof.Mic.Periods) / 2
+	if min := 4 * periodDur; stallThreshold < min {
+		stallThreshold = min
+	}
+
 	var (
 		firstArrival time.Time
 		lastArrival  time.Time
 		lastReport   time.Time
+		lastStallLog time.Time
 		framesTotal  int64
 		stalls       uint64
 		subDrops     uint64
@@ -118,9 +126,17 @@ func (m *ProfileMicrophone) readLoop() {
 		now := time.Now()
 		if firstArrival.IsZero() {
 			firstArrival, lastReport = now, now
-		} else if gap := now.Sub(lastArrival); gap > 2*periodDur {
+		} else if gap := now.Sub(lastArrival); gap > stallThreshold {
+			// Only gaps well beyond normal batching are worth reporting. The
+			// FPGA hands over periods in pairs, so a steady ~2x-period gap is
+			// the expected arrival pattern on checkers, not a stall — logging
+			// at >2x produced ~30 lines per capture of pure noise.
 			stalls++
-			log.Printf("mic: arrival gap %v (period %v) — overrun in progress", gap, periodDur)
+			if now.Sub(lastStallLog) > time.Minute {
+				log.Printf("mic: arrival gap %v (period %v, threshold %v) — possible overrun",
+					gap.Round(time.Millisecond), periodDur.Round(time.Millisecond), stallThreshold)
+				lastStallLog = now
+			}
 		}
 		lastArrival = now
 		framesTotal += int64(n / frameBytes)

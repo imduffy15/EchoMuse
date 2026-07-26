@@ -342,8 +342,12 @@ func (p *PCM) BufferFrames() int { return int(p.bufferFrames) }
 // Read fills buf and returns the number of bytes read. On an overrun it
 // re-prepares and restarts once, so callers see a short read rather than a
 // dead stream.
+//
+// snd_pcm_read takes a byte count, converts it to frames internally, and
+// converts its result back with frames_to_bytes — so the return value is
+// bytes, not frames, despite the frame-oriented ALSA API around it.
 func (p *PCM) Read(buf []byte) (int, error) {
-	frames, err := syscall.Read(p.fd, buf)
+	n, err := syscall.Read(p.fd, buf)
 	if err == syscall.EPIPE {
 		if e := p.Prepare(); e != nil {
 			return 0, e
@@ -356,17 +360,13 @@ func (p *PCM) Read(buf []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// The PCM read interface returns frames, not bytes.
-	n := frames * p.bytesPerFrame
-	if n > len(buf) {
-		n = len(buf)
-	}
 	return n, nil
 }
 
-// Write queues buf for playback, recovering from underruns.
+// Write queues buf for playback and returns the number of bytes accepted,
+// recovering from underruns. Same byte-oriented return as Read.
 func (p *PCM) Write(buf []byte) (int, error) {
-	frames, err := syscall.Write(p.fd, buf)
+	n, err := syscall.Write(p.fd, buf)
 	if err == syscall.EPIPE {
 		if e := p.Prepare(); e != nil {
 			return 0, e
@@ -376,7 +376,7 @@ func (p *PCM) Write(buf []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return frames * p.bytesPerFrame, nil
+	return n, nil
 }
 
 // Close drops any in-flight audio and releases the device.
