@@ -69,7 +69,7 @@ func main() {
 	// Idempotent: a no-op on boots where init never starts it (Lounge).
 	exec.Command("stop", "smarthomewifid").Run()
 
-	buttonController, err := internalbuttons.NewButtonController()
+	buttonController, err := internalbuttons.NewButtonController(prof)
 	if err != nil {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
 	}
@@ -167,7 +167,7 @@ func main() {
 	bleScanner := bluetooth.NewScanner(func(batch []bluetooth.Advert) {
 		controlClient.SendBleAdverts(batch)
 	})
-	applyBleConfig(bleScanner)
+	applyBleConfig(bleScanner, prof)
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
@@ -272,7 +272,7 @@ func main() {
 			s.SeedVolume(msg.StartupVolume)
 		}
 		applyAecConfig(canceller)
-		applyBleConfig(bleScanner)
+		applyBleConfig(bleScanner, prof)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -768,7 +768,14 @@ func applyAecConfig(canceller *aec.Canceller) {
 // applyBleConfig starts/stops the BLE proxy scanner from the current
 // effective config. SetEnabled is idempotent, so calling it on every config
 // push is free.
-func applyBleConfig(scanner *bluetooth.Scanner) {
+func applyBleConfig(scanner *bluetooth.Scanner, prof *profile.Profile) {
+	if !prof.SupportsBLEProxy {
+		// Never start the scanner on a device whose HCI transport is unproven:
+		// starting it disables the Android Bluetooth stack permanently to take
+		// /dev/stpbt, which is a bad trade if the scan then fails.
+		scanner.SetEnabled(false)
+		return
+	}
 	snap := config.Get().Snapshot()
 	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
 }

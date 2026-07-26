@@ -51,6 +51,32 @@ type Speaker struct {
 // FrameBytes is the size of one interleaved output frame.
 func (s Speaker) FrameBytes() int { return s.Channels * s.Format.Bytes() }
 
+// Buttons describes the evdev nodes carrying physical button events.
+//
+// Paths differ per device and some buttons simply do not exist: the Echo Dot
+// has an action ("dot") button, the Echo Show 5 has only volume keys plus a
+// mic-mute switch, so DotDevice is empty there and the subscriber skips it.
+type Buttons struct {
+	// DotDevice carries the action button. Empty when the device has none.
+	DotDevice string
+	// VolumeDevice carries volume up/down. Empty disables volume handling.
+	VolumeDevice string
+}
+
+// Volume describes the mixer control that carries playback volume.
+//
+// biscuit drives control 61 ("PCM Playback Volume"); on checkers that index is
+// Pmic_Anc_Switch, and the equivalent is the RT5616's DAC1 digital volume.
+type Volume struct {
+	// Selector is passed to tinymix — a control index or a name.
+	Selector string
+	// DisplayName is how tinymix prints the control, used to parse the value
+	// back out of its output.
+	DisplayName string
+	// Max is the control's upper bound.
+	Max int
+}
+
 // Profile is the full hardware description for one device.
 type Profile struct {
 	// Name matches ro.product.device.
@@ -64,6 +90,22 @@ type Profile struct {
 	// AmpOff silences the output stage. Applied when the server shuts down or
 	// when playback is idle, so an enabled amp on an idle DAC does not hiss.
 	AmpOff []alsa.Control
+
+	// Buttons maps the physical controls to evdev nodes.
+	Buttons Buttons
+	// Volume is the playback volume control.
+	Volume Volume
+	// HasMuteButtonLED is true where a discrete LED sits under the mic-off
+	// button. The Show 5 has no such LED and no gpio444 to export.
+	HasMuteButtonLED bool
+
+	// SupportsBLEProxy gates the ESPHome bluetooth_proxy feature. Enabling it
+	// is not free: the scanner needs exclusive ownership of /dev/stpbt, so it
+	// permanently `pm disable`s the Android Bluetooth stack to take it. Only
+	// turn this on where the HCI transport is known to work — on checkers the
+	// scan fails immediately ("read during cmd 0c03: EOF"), so disabling
+	// Bluedroid would cost the device its Bluetooth for nothing.
+	SupportsBLEProxy bool
 
 	// HasLEDRing is false on devices with a screen and no LED ring; the null
 	// LED controller is used instead.
@@ -141,8 +183,19 @@ var biscuit = Profile{
 		{Index: 61, Values: []string{"0", "0"}, Optional: true},
 		{Index: 5, Values: []string{"Off"}, Optional: true},
 	},
-	HasLEDRing: true,
-	LEDCount:   12,
+	Buttons: Buttons{
+		DotDevice:    "/dev/input/event1",
+		VolumeDevice: "/dev/input/event2",
+	},
+	Volume: Volume{
+		Selector:    "61",
+		DisplayName: "PCM Playback Volume",
+		Max:         175,
+	},
+	HasMuteButtonLED: true,
+	SupportsBLEProxy: true,
+	HasLEDRing:       true,
+	LEDCount:         12,
 	AdcDigitalGainCtls: []alsa.Control{
 		{Index: 89}, {Index: 107}, {Index: 125}, {Index: 143},
 	},
@@ -150,7 +203,7 @@ var biscuit = Profile{
 		{Index: 92}, {Index: 110}, {Index: 128}, {Index: 146},
 	},
 	Beamforming:    true,
-	StopServices:   []string{"mixer", "ledcontroller"},
+	StopServices:   []string{"mixer", "ledcontroller", "acebutton"},
 	UseALSABackend: false,
 }
 
@@ -203,8 +256,26 @@ var checkers = Profile{
 	AmpOff: []alsa.Control{
 		{Name: "Ext_Speaker_Amp_Switch", Values: []string{"On"}, Optional: true},
 	},
-	HasLEDRing: false,
-	LEDCount:   0,
+	Buttons: Buttons{
+		// No action button on a Show 5. /proc/bus/input/devices lists
+		// event6 as "gpio-keys", which is volumeup/volumedown on GPIO
+		// 393/394 (see checkers.dtsi); event2 is the touchscreen.
+		DotDevice:    "",
+		VolumeDevice: "/dev/input/event6",
+	},
+	Volume: Volume{
+		// The RT5616 DAC1 digital volume, 0..175 like biscuit's control.
+		// "OUT Playback Volume" (0..39) is the analogue LOUT gain and is
+		// left at its default; attenuating digitally keeps the output
+		// stage in the state the HAL uses.
+		Selector:    "DAC1 Playback Volume",
+		DisplayName: "DAC1 Playback Volume",
+		Max:         175,
+	},
+	HasMuteButtonLED: false,
+	SupportsBLEProxy: false,
+	HasLEDRing:       false,
+	LEDCount:         0,
 	AdcDigitalGainCtls: []alsa.Control{
 		{Name: "ADC_A Digital Volume Control"},
 	},

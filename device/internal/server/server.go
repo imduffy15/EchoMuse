@@ -8,6 +8,7 @@ import (
 	"time"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
@@ -131,8 +132,10 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		// Discrete red LED under the mic-off button (GPIO, separate from
 		// the ring) — export + off. Non-fatal: an unmuted boot without a
 		// button LED is cosmetic, everything else still works.
-		if err := internalLed.InitMuteButtonLED(); err != nil {
-			log.Printf("Mute button LED init failed: %v", err)
+		if profile.Detect().HasMuteButtonLED {
+			if err := internalLed.InitMuteButtonLED(); err != nil {
+				log.Printf("Mute button LED init failed: %v", err)
+			}
 		}
 
 		// A muted state restored from state.json was applied to the ADC
@@ -356,6 +359,7 @@ func clampAdd(v uint8, delta int) uint8 {
 //     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
 //     means the cancelled turn's LED cleanup arrives after the red ring
 //     is up — it must not clear it. Unmute clears the ring explicitly.
+//
 // listeningHint is the controller's explicit "this frame is the listening
 // ring" flag (nil from pre-scene controllers). When absent, fall back to
 // the historical heuristic — a 12-LED all-green frame — which only works

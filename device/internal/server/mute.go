@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"log"
 	"os/exec"
 	"sync"
@@ -124,6 +125,9 @@ func (m *muteController) applyUnmute() {
 // transition for free. Direct binding call, same precedent as setAdcMute's
 // tinymix exec above.
 func setMuteButtonLED(on bool) {
+	if !profile.Detect().HasMuteButtonLED {
+		return
+	}
 	if err := internalLed.SetMuteButtonLED(on); err != nil {
 		log.Printf("Mute button LED: %v", err)
 	}
